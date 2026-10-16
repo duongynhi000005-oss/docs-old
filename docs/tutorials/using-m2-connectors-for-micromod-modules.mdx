@@ -1,0 +1,332 @@
+---
+title: 'Using M.2 Connectors for MicroMod Modules'
+description: 'Design interchangeable MicroMod carrier boards and processor modules using the 67-pin M.2 E-Key connector in tscircuit'
+icon: 'code'
+---
+
+## Overview
+
+[SparkFun MicroMod](https://www.sparkfun.com/micromod) is a modular hardware ecosystem that uses a standardized **67-pin M.2 (NGFF) E-Key connector** to pair interchangeable **Processor Boards** (ESP32, RP2040, STM32, nRF52840, SAMD51, Teensy) with specialized **Carrier Boards**.
+
+Instead of redesigning your entire PCB when switching microcontrollers, MicroMod maps common microcontroller buses—Power, USB, UART, I2C, SPI, SDIO, CAN, I2S, ADC, PWM, and general-purpose I/O—to fixed positions on a 0.5 mm-pitch M.2 E-Key socket.
+
+In this guide, you will learn:
+1. How the MicroMod M.2 E-Key connector physical interface and pinout are organized.
+2. How to define a reusable `MicroModSocket` component in **tscircuit** with full pin labels and schematic port grouping.
+3. How to wire a complete **MicroMod Carrier Board** schematic (power decoupling, I2C pull-ups, reset circuit, and peripheral headers).
+
+---
+
+## 1. Understanding the MicroMod M.2 E-Key Interface
+
+MicroMod uses a standard surface-mount **M.2 E-Key (Socket 1) connector** with a 0.5 mm pin pitch and a bevelled 22 mm × 22 mm processor card secured by an M2.5 × 3 mm machine screw into a 4.2 mm SMD standoff.
+
+- **Odd pins (`1`–`75`)** sit on the **top row** of the M.2 connector and make contact with the top pads of the Processor Board.
+- **Even pins (`2`–`74`)** sit on the **bottom row** of the M.2 connector and make contact with the bottom pads of the Processor Board.
+- **E-Key Mechanical Notch**: Pins `24` through `31` are omitted to form the polarization key that prevents reversed or incompatible M.2 cards from being inserted.
+
+### Core Pinout Summary (MicroMod Interface v1.0)
+
+| Functional Group | M.2 Pin Numbers | MicroMod Signal Names | Notes |
+| --- | --- | --- | --- |
+| **Power & Ground** | `2`, `4` (`3.3V`), `70` (`VIN`), `74` (`RTC_3V`), `1`, `7`, `15`, `21`, `33`, `39`, `45`, `59`, `65`, `71`, `75` (`GND`) | `3.3V`, `VIN_5V`, `3.3V_EN`, `RTC_3V`, `GND` | Carrier supplies regulated `3.3V` (up to 1 A) and `3.3V_EN` control |
+| **Boot, Reset & Status** | `5` (`STAT`), `44` (`BOOT`), `68` (`RESET#`) | `STAT`, `BOOT`, `RESET` | Active-low `RESET#` and `BOOT` with carrier pull-ups |
+| **USB (Device / Host)** | `3` (`USB_D+`), `5` (`USB_D-`), `6` (`USB_VIN`) | `USB_DP`, `USB_DM`, `USB_VIN` | Differential 90 Ω pair to processor native USB |
+| **Primary I2C + Interrupt** | `12` (`I2C_SDA`), `14` (`I2C_SCL`), `16` (`I2C_INT#`) | `I2C_SDA`, `I2C_SCL`, `I2C_INT` | Typically routed to Qwiic / STEMMA QT connector with 4.7 kΩ pull-ups |
+| **Secondary I2C** | `50` (`I2C_SDA1`), `52` (`I2C_SCL1`) | `I2C_SDA1`, `I2C_SCL1` | Dedicated secondary I2C bus |
+| **UART1 & UART2** | `17` (`TX1`), `19` (`RX1`), `20` (`RX2`), `22` (`TX2`), `18` (`CTS1`), `23` (`RTS1`) | `UART_TX1`, `UART_RX1`, `UART_RTS1`, `UART_CTS1`, `UART_TX2`, `UART_RX2` | Logic-level 3.3 V hardware serial ports |
+| **Primary SPI** | `55` (`CS`), `57` (`SCK`), `59` (`MOSI`), `61` (`MISO`) | `SPI_CS`, `SPI_SCK`, `SPI_COPI`, `SPI_CIPO` | General peripheral SPI bus |
+| **SDIO / Secondary SPI** | `60` (`SCK`), `62` (`CMD/COPI`), `64` (`DATA0/CIPO`), `66` (`DATA1`), `67` (`DATA2`), `69` (`DATA3/CS`) | `SDIO_SCK`, `SDIO_CMD`, `SDIO_DATA0`..`DATA3` | Used for microSD cards or secondary high-speed SPI flash |
+| **CAN & Audio (I2S)** | `41` (`CAN_RX`), `43` (`CAN_TX`), `54` (`AUD_MCLK`), `56` (`AUD_OUT`), `58` (`AUD_IN`), `35` (`AUD_LRCLK`), `37` (`AUD_BCLK`) | `CAN_RX`, `CAN_TX`, `AUD_MCLK`, `AUD_OUT`, `AUD_IN`, `AUD_LRCLK`, `AUD_BCLK` |Requires external CAN transceiver on carrier board |
+| **Analog, PWM & GPIO** | `34` (`A0`), `38` (`A1`), `32` (`PWM0`), `47` (`PWM1`), `10` (`D0`), `18` (`D1`), `40`–`73` (`G0`–`G10`) | `A0`, `A1`, `PWM0`, `PWM1`, `D0`, `D1`, `G0`..`G10` | 3.3 V max analog reference unless divided on carrier |
+
+---
+
+## 2. Creating a Reusable MicroMod M.2 Socket Component
+
+We can model the 67-pin M.2 E-Key connector in **tscircuit** using `<chip />` with explicit `pinLabels` and `schPortArrangement` so that schematics remain clean and readable.
+
+```tsx title="lib/MicroModConnector.tsx"
+export const microModPinLabels = {
+  // Power & Ground
+  pin1: "GND1",
+  pin2: "V3_3",
+  pin4: "V3_3_2",
+  pin8: "V3_3_EN",
+  pin70: "VIN",
+  pin74: "RTC_3V",
+  pin75: "GND2",
+
+  // USB & Status
+  pin3: "USB_DP",
+  pin5: "USB_DM",
+  pin6: "LED_STAT",
+  pin68: "RESET_N",
+  pin44: "BOOT_N",
+
+  // Primary & Secondary I2C
+  pin12: "I2C_SDA",
+  pin14: "I2C_SCL",
+  pin16: "I2C_INT_N",
+  pin50: "I2C_SDA1",
+  pin52: "I2C_SCL1",
+
+  // UART Buses
+  pin17: "UART_TX1",
+  pin19: "UART_RX1",
+  pin23: "UART_RTS1",
+  pin18: "UART_CTS1",
+  pin22: "UART_TX2",
+  pin20: "UART_RX2",
+
+  // Primary SPI Bus
+  pin55: "SPI_CS",
+  pin57: "SPI_SCK",
+  pin61: "SPI_COPI",
+  pin63: "SPI_CIPO",
+
+  // Analog, PWM & Digital GPIO
+  pin34: "A0",
+  pin38: "A1",
+  pin32: "PWM0",
+  pin47: "PWM1",
+  pin10: "D0",
+  pin11: "D1",
+  pin40: "G0",
+  pin42: "G1",
+  pin46: "G2",
+  pin48: "G3",
+} as const
+
+export const MicroModConnector = (props: {
+  name: string
+  schX?: number
+  schY?: number
+  pcbX?: number
+  pcbY?: number
+}) => (
+  <chip
+    name={props.name}
+    manufacturerPartNumber="MDT420E01001"
+    schX={props.schX ?? 0}
+    schY={props.schY ?? 0}
+    pcbX={props.pcbX ?? 0}
+    pcbY={props.pcbY ?? 0}
+    schWidth={3.2}
+    schHeight={6.5}
+    schPinSpacing={0.3}
+    pinLabels={microModPinLabels}
+    schPortArrangement={{
+      leftSide: {
+        direction: "top-to-bottom",
+        pins: [
+          "pin2",
+          "pin4",
+          "pin8",
+          "pin70",
+          "pin74",
+          "pin68",
+          "pin44",
+          "pin3",
+          "pin5",
+          "pin1",
+          "pin75",
+        ],
+      },
+      rightSide: {
+        direction: "top-to-bottom",
+        pins: [
+          "pin12",
+          "pin14",
+          "pin16",
+          "pin50",
+          "pin52",
+          "pin17",
+          "pin19",
+          "pin22",
+          "pin20",
+          "pin55",
+          "pin57",
+          "pin61",
+          "pin63",
+          "pin34",
+          "pin38",
+          "pin32",
+          "pin47",
+          "pin10",
+          "pin11",
+          "pin40",
+          "pin42",
+          "pin46",
+          "pin48",
+          "pin6",
+        ],
+      },
+    }}
+  />
+)
+```
+
+---
+
+## 3. Building a MicroMod Carrier Board Circuit
+
+When designing a MicroMod Carrier Board, there are four essential support subcircuits to include around the M.2 socket:
+
+1. **Local 3.3V Bypassing**: Place a `10uF` bulk capacitor and a `0.1uF` ceramic decoupling capacitor close to pins `2` and `4` (`V3_3`) of the M.2 connector.
+2. **I2C Pull-Up Network**: Add `4.7kΩ` pull-up resistors from `I2C_SDA` (pin `12`) and `I2C_SCL` (pin `14`) to `3.3V` so connected Qwiic / I2C sensors work across all processor modules.
+3. **Reset & Boot Pull-Ups**: Pull `RESET_N` (pin `68`) and `BOOT_N` (pin `44`) up to `3.3V` via `10kΩ` resistors so tactile buttons can pull them to `GND`.
+4. **Standoff Mounting Hole**: Place a grounded `<platedhole />` 22 mm away from the M.2 socket centerline to accept the M2.5 standoff that locks the processor module in place.
+
+```tsx title="MicroModCarrierBoard.tsx"
+import { MicroModConnector } from "./lib/MicroModConnector"
+
+export default () => (
+  <board width="50mm" height="45mm">
+    {/* 67-pin M.2 E-Key Socket */}
+    <MicroModConnector name="J1" schX={0} schY={0} pcbX={0} pcbY={-10} />
+
+    {/* M2.5 Standoff Mounting Hole for Processor Module (22mm from socket) */}
+    <platedhole
+      name="H1"
+      shape="circle"
+      holeDiameter="2.7mm"
+      outerDiameter="5.0mm"
+      pcbX={0}
+      pcbY={12}
+    />
+
+    {/* 3.3V Decoupling Capacitors */}
+    <capacitor
+      name="C1"
+      capacitance="10uF"
+      footprint="0805"
+      schX={-5}
+      schY={2}
+      pcbX={-12}
+      pcbY={-10}
+    />
+    <capacitor
+      name="C2"
+      capacitance="0.1uF"
+      footprint="0402"
+      schX={-3.5}
+      schY={2}
+      pcbX={-9}
+      pcbY={-10}
+    />
+
+    {/* Primary I2C Bus Pull-Up Resistors */}
+    <resistor
+      name="R_SDA"
+      resistance="4.7k"
+      footprint="0402"
+      schX={4}
+      schY={3}
+      pcbX={10}
+      pcbY={-8}
+    />
+    <resistor
+      name="R_SCL"
+      resistance="4.7k"
+      footprint="0402"
+      schX={5.5}
+      schY={3}
+      pcbX={10}
+      pcbY={-5}
+    />
+
+    {/* Active-Low Reset Pull-Up & Status LED */}
+    <resistor
+      name="R_RST"
+      resistance="10k"
+      footprint="0402"
+      schX={-4}
+      schY={-1}
+      pcbX={-10}
+      pcbY={-5}
+    />
+    <resistor
+      name="R_STAT"
+      resistance="1k"
+      footprint="0402"
+      schX={4}
+      schY={-3}
+      pcbX={10}
+      pcbY={5}
+    />
+    <led
+      name="D_STAT"
+      footprint="0603"
+      schX={6}
+      schY={-3}
+      pcbX={14}
+      pcbY={5}
+    />
+
+    {/* Qwiic / I2C Expansion Header */}
+    <pinheader
+      name="J_I2C"
+      pinCount={4}
+      footprint="pinrow4"
+      schX={7.5}
+      schY={2.5}
+      pcbX={18}
+      pcbY={-6}
+    />
+
+    {/* Power & Decoupling Traces */}
+    <trace from=".J1 > .V3_3" to="net.V3_3" />
+    <trace from=".J1 > .V3_3_2" to="net.V3_3" />
+    <trace from=".C1 > .pos" to="net.V3_3" />
+    <trace from=".C1 > .neg" to="net.GND" />
+    <trace from=".C2 > .pos" to="net.V3_3" />
+    <trace from=".C2 > .neg" to="net.GND" />
+    <trace from=".J1 > .GND1" to="net.GND" />
+    <trace from=".J1 > .GND2" to="net.GND" />
+
+    {/* Reset Pull-Up */}
+    <trace from=".R_RST > .pin1" to="net.V3_3" />
+    <trace from=".R_RST > .pin2" to=".J1 > .RESET_N" />
+
+    {/* I2C Pull-Ups and Qwiic Header Connections */}
+    <trace from=".R_SDA > .pin1" to="net.V3_3" />
+    <trace from=".R_SDA > .pin2" to=".J1 > .I2C_SDA" />
+    <trace from=".R_SCL > .pin1" to="net.V3_3" />
+    <trace from=".R_SCL > .pin2" to=".J1 > .I2C_SCL" />
+    <trace from=".J_I2C > .pin1" to="net.GND" />
+    <trace from=".J_I2C > .pin2" to="net.V3_3" />
+    <trace from=".J_I2C > .pin3" to=".J1 > .I2C_SDA" />
+    <trace from=".J_I2C > .pin4" to=".J1 > .I2C_SCL" />
+
+    {/* Status LED Connection */}
+    <trace from=".J1 > .LED_STAT" to=".R_STAT > .pin1" />
+    <trace from=".R_STAT > .pin2" to=".D_STAT > .pos" />
+    <trace from=".D_STAT > .neg" to="net.GND" />
+  </board>
+)
+```
+
+---
+
+## 4. Layout & Mechanical Design Checklist
+
+When laying out either a MicroMod Carrier Board or a Processor Module PCB:
+
+- **Connector Part Numbers**:
+  - **Standard 4.2 mm Height M.2 E-Key Socket**: Amphenol `MDT420E01001` or TE Connectivity `2199230-4`.
+  - **SMD Standoff (4.2 mm Height, M2.5 Thread)**: Wurth Elektronik `9774025243R` placed `22.0 mm` from the connector datum line.
+- **High-Speed Differential Routing**:
+  - Route `USB_DP` (pin `3`) and `USB_DM` (pin `5`) as a length-matched 90 Ω differential pair with minimal via transitions.
+- **Analog Voltage Limits**:
+  - MicroMod analog inputs (`A0`, `A1`) are strictly **3.3 V maximum** across all processor families. Always place a resistive voltage divider or op-amp buffer on the Carrier Board if measuring 5 V or battery voltages.
+
+---
+
+## References
+
+- [SparkFun MicroMod Overview](https://www.sparkfun.com/micromod)
+- [Getting Started with MicroMod Tutorial](https://learn.sparkfun.com/tutorials/getting-started-with-micromod)
+- [SparkFun MicroMod Interface v1.0 — Pin Descriptions (PDF)](https://cdn.sparkfun.com/assets/learn_tutorials/1/2/0/6/SparkFun_MicroMod_Interface_v1.0_-_Pin_Descriptions.pdf)
+- [SparkFun MicroMod Interface v1.0 — Pinout Table (PDF)](https://cdn.sparkfun.com/assets/learn_tutorials/1/2/0/6/SparkFun_MicroMod_Interface_v1.0_-_Pinout.pdf)
+- [MicroMod General Pinout v1.0 Graphical Datasheet (PDF)](https://cdn.sparkfun.com/assets/learn_tutorials/1/1/8/9/MicroMod_General_Pinout_v10_Graphical_Datasheet.pdf)
